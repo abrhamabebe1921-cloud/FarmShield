@@ -1,32 +1,11 @@
 import {
   Chart as ChartJS,
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  BarElement,
-  Title,
-  Tooltip,
-  Legend,
-  Filler,
-  ArcElement,
-  RadialLinearScale,
+  registerables,
 } from 'chart.js';
 
-// Register standard Chart.js modules
-ChartJS.register(
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  BarElement,
-  Title,
-  Tooltip,
-  Legend,
-  Filler,
-  ArcElement,
-  RadialLinearScale
-);
+// Register all standard Chart.js controllers, elements, scales, and plugins
+// (including LineController, BarController, DoughnutController, RadarController, etc.)
+ChartJS.register(...registerables);
 
 // Warm Natural Elegance Chart.js Defaults
 ChartJS.defaults.font.family = "'Plus Jakarta Sans', 'Inter', system-ui, sans-serif";
