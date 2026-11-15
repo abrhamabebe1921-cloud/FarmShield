@@ -11,7 +11,8 @@ import {
   Gauge,
   AlertTriangle,
   ArrowDownCircle,
-  Clock
+  Clock,
+  BookOpen
 } from 'lucide-react';
 import { Doughnut } from 'react-chartjs-2';
 import '../utils/chartSetup';
@@ -19,12 +20,14 @@ import { useFarmShield } from '../context/FarmShieldContext';
 import { FarmShieldApi } from '../services/api';
 import { SoilInformation, SmapSoilMoistureIntelligence } from '../types';
 import { DataSourceBadge } from '../components/common/DataSourceBadge';
+import { SoilKnowledgeModal } from '../components/common/SoilKnowledgeModal';
 
 export const SoilPage: React.FC = () => {
   const { farms, selectedFarm, setSelectedFarm } = useFarmShield();
   const [soil, setSoil] = useState<SoilInformation | null>(null);
   const [moisture, setMoisture] = useState<SmapSoilMoistureIntelligence | null>(null);
   const [loadingMoisture, setLoadingMoisture] = useState<boolean>(false);
+  const [showSoilModal, setShowSoilModal] = useState<boolean>(false);
 
   useEffect(() => {
     if (selectedFarm) {
@@ -84,6 +87,14 @@ export const SoilPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowSoilModal(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs bg-[#244C3A] text-white hover:bg-[#1b3a2c] rounded-xl font-bold shadow-natural-xs transition-all"
+          >
+            <BookOpen className="w-3.5 h-3.5 text-[#8EB897]" />
+            <span>Soil & Crop Guide</span>
+          </button>
           <span className="text-xs text-[#748077] font-medium">Active Farm:</span>
           <select
             aria-label="Select farm for soil data"
@@ -383,6 +394,13 @@ export const SoilPage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Soil Knowledge & Crop Guide Modal */}
+      <SoilKnowledgeModal
+        isOpen={showSoilModal}
+        onClose={() => setShowSoilModal(false)}
+        selectedSoilType={selectedFarm?.soilType}
+      />
     </div>
   );
 };

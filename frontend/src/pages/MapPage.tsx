@@ -38,13 +38,17 @@ import {
   BookOpen,
   Calendar,
   Compass,
-  Tractor
+  Tractor,
+  ShieldCheck,
+  Map as MapIcon,
+  ArrowRight
 } from 'lucide-react';
 import L from 'leaflet';
 import { useFarmShield } from '../context/FarmShieldContext';
 import { UnitConverter } from '../utils/unitConverter';
+import { calculatePolygonAreaHectares, parseGeoJsonToLeaflet } from '../utils/geoUtils';
 import { FarmShieldApi } from '../services/api';
-import { CountryConfig, Crop } from '../types';
+import { CountryConfig, Crop, Farm, FarmSpatialMetadata, CropRecommendationCandidate } from '../types';
 import { CountryFlag } from '../components/common/CountryFlag';
 import { CropImage } from '../components/common/CropImage';
 import { AFRICAN_ADMIN_DIVISIONS } from '../data/countries/divisions';
@@ -164,6 +168,8 @@ export const MapPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const queryCrop = searchParams.get('crop');
+  const queryFarmId = searchParams.get('farmId');
+  const queryScore = searchParams.get('score');
 
   const {
     farms,
@@ -182,6 +188,15 @@ export const MapPage: React.FC = () => {
   // GeoJSON Continental Vectors
   const [geoJsonData, setGeoJsonData] = useState<any | null>(null);
   const [loadingGeo, setLoadingGeo] = useState<boolean>(true);
+
+  // Recommendation-to-Map Spatial Focus State
+  const [recommendedCrop, setRecommendedCrop] = useState<string | null>(queryCrop);
+  const [recommendationScore, setRecommendationScore] = useState<number | null>(
+    queryScore ? parseInt(queryScore, 10) : null
+  );
+  const [farmSpatial, setFarmSpatial] = useState<FarmSpatialMetadata | null>(null);
+  const [farmRecCandidates, setFarmRecCandidates] = useState<CropRecommendationCandidate[]>([]);
+  const [loadingSpatial, setLoadingSpatial] = useState<boolean>(false);
 
   // Basemap & Environmental Analytical Layers (Phase 4.9)
   const [baseMap, setBaseMap] = useState<BaseMapStyle>('satellite');
@@ -248,6 +263,56 @@ export const MapPage: React.FC = () => {
     loadGeoJson();
   }, []);
 
+  // Recommendation-to-Map Navigation & Spatial Resolution Effect
+  useEffect(() => {
+    if (queryFarmId) {
+      const targetFarm = farms.find((f) => f.id === queryFarmId);
+      if (targetFarm) {
+        setSelectedFarm(targetFarm);
+        if (targetFarm.countryCode) {
+          setSelectedCountryCode(targetFarm.countryCode);
+        }
+        setMapTargetCenter([targetFarm.latitude, targetFarm.longitude]);
+        setMapTargetZoom(14); // Zoom close to farm boundary
+        setRightPanelOpen(true);
+
+        // Fetch official spatial metadata & recommendations for this farm
+        setLoadingSpatial(true);
+        FarmShieldApi.getFarmRecommendations(targetFarm.id)
+          .then((res) => {
+            if (res.success && res.data) {
+              if (res.data.spatial) {
+                setFarmSpatial(res.data.spatial);
+              }
+              const recList = res.data.data?.recommendations || res.data.recommendations || [];
+              setFarmRecCandidates(recList);
+
+              if (queryCrop) {
+                const matchRec = recList.find(
+                  (r: any) =>
+                    r.cropId.toLowerCase() === queryCrop.toLowerCase() ||
+                    r.cropName.toLowerCase() === queryCrop.toLowerCase()
+                );
+                if (matchRec) {
+                  setRecommendationScore(matchRec.overallScore);
+                  setRecommendedCrop(matchRec.cropName);
+                }
+              }
+            }
+          })
+          .catch((err) => {
+            console.warn('Failed to load farm recommendation spatial metadata:', err);
+          })
+          .finally(() => {
+            setLoadingSpatial(false);
+          });
+
+        // Trigger spatial point query for environmental layers at farm location
+        handleMapLocationClick(targetFarm.latitude, targetFarm.longitude);
+      }
+    }
+  }, [queryFarmId, queryCrop, farms]);
+
   // Handle map click with real spatial query to backend
   const handleMapLocationClick = async (lat: number, lng: number) => {
     setClickedLocation({ lat, lng });
@@ -310,6 +375,10 @@ export const MapPage: React.FC = () => {
     const c = countries.find((item) => (item.isoCode || item.isoAlpha2) === isoCode);
     if (c?.bounds) {
       setTargetBounds(c.bounds);
+      if (c.bounds.center) {
+        setMapTargetCenter(c.bounds.center as [number, number]);
+        setMapTargetZoom(c.bounds.defaultZoom || 6);
+      }
     }
   };
 
@@ -993,43 +1062,134 @@ export const MapPage: React.FC = () => {
               </>
             )}
 
+            {/* ================= REGISTERED FARM BOUNDARIES & PLOTS ================= */}
             {showFarms &&
-              farms.map((farm) => (
-                <Marker
-                  key={farm.id}
-                  position={[farm.latitude, farm.longitude]}
-                  icon={farmIcon}
-                  eventHandlers={{
-                    click: () => {
-                      setSelectedFarm(farm);
-                      if (farm.countryCode) setSelectedCountryCode(farm.countryCode);
-                      openContextDrawer({
-                        type: 'farm',
-                        title: farm.name,
-                        subtitle: `${farm.region || farm.adminLevel1 || ''}, ${farm.country}`,
-                        badge: farm.cropProvenance || 'FIELD_VERIFIED RESEARCH',
-                        badgeColor: 'green',
-                        data: farm,
-                        provenance: {
-                          source: 'Institutional Research Registry / Farmer Observation',
-                          status: 'LIVE',
-                          spatialResolution: farm.boundaryGeoJson ? 'Verified Polygon Boundary' : 'Point Coordinates',
-                          limitations: 'Soil and climate data are mapped from coordinate point query to ISRIC and CHIRPS.',
-                        },
-                      });
-                    }
-                  }}
-                >
-                  <Popup>
-                    <div className="p-1 max-w-[200px] font-sans text-xs">
-                      <strong className="text-[#2ECC71] block">{farm.name}</strong>
-                      <div className="text-[11px] text-white">Planted: <strong>{farm.currentCrop}</strong></div>
-                      <div className="text-[10px] text-[#A0AEC0]">{farm.region}, {farm.country}</div>
-                      <div className="text-[9px] text-[#2ECC71] mt-1 font-bold">Click marker to inspect scientific evidence →</div>
-                    </div>
-                  </Popup>
-                </Marker>
-              ))}
+              farms.map((farm) => {
+                const isSelected = selectedFarm?.id === farm.id;
+                const boundaryCoords = parseGeoJsonToLeaflet(farm.boundaryGeoJson);
+                if (!boundaryCoords) return null;
+
+                return (
+                  <React.Fragment key={`farm-poly-${farm.id}`}>
+                    <Polygon
+                      positions={boundaryCoords}
+                      pathOptions={{
+                        color: isSelected ? '#2ECC71' : '#F1C40F',
+                        fillColor: isSelected ? '#2ECC71' : '#F1C40F',
+                        fillOpacity: isSelected ? 0.35 : 0.15,
+                        weight: isSelected ? 3 : 1.5,
+                        dashArray: isSelected ? undefined : '4, 4'
+                      }}
+                      eventHandlers={{
+                        click: () => {
+                          setSelectedFarm(farm);
+                          if (farm.countryCode) setSelectedCountryCode(farm.countryCode);
+                          setRightPanelOpen(true);
+                          handleMapLocationClick(farm.latitude, farm.longitude);
+                        }
+                      }}
+                    >
+                      <Tooltip sticky className="farmshield-map-tooltip">
+                        <div className="p-1 font-sans text-xs">
+                          <div className="text-[10px] text-[#2ECC71] font-bold">
+                            {farm.cropProvenance === 'FIELD_VERIFIED' ? 'VERIFIED FARM BOUNDARY' : 'REGISTERED PARCEL'}
+                          </div>
+                          <strong className="text-white block">{farm.name}</strong>
+                          <div className="text-[10px] text-[#A0AEC0]">
+                            Area: {farm.size} ha • Current: {farm.currentCrop}
+                          </div>
+                        </div>
+                      </Tooltip>
+                    </Polygon>
+
+                    {/* Sub-field Plots (if registered) */}
+                    {isSelected && farm.plots && farm.plots.map((plot) => {
+                      const plotCoords = parseGeoJsonToLeaflet(plot.boundaryGeoJson);
+                      if (!plotCoords) return null;
+
+                      return (
+                        <Polygon
+                          key={`plot-poly-${plot.id}`}
+                          positions={plotCoords}
+                          pathOptions={{
+                            color: '#38BDF8',
+                            fillColor: '#38BDF8',
+                            fillOpacity: 0.25,
+                            weight: 2,
+                            dashArray: '2, 3'
+                          }}
+                        >
+                          <Tooltip sticky className="farmshield-map-tooltip">
+                            <div className="p-1 font-sans text-xs">
+                              <span className="text-[9px] text-[#38BDF8] uppercase font-bold">SUB-FIELD ZONE</span>
+                              <strong className="text-white block">{plot.name}</strong>
+                              <div className="text-[10px] text-[#A0AEC0]">{plot.areaHectares} ha • {plot.cropName}</div>
+                            </div>
+                          </Tooltip>
+                        </Polygon>
+                      );
+                    })}
+                  </React.Fragment>
+                );
+              })}
+
+            {showFarms &&
+              farms.map((farm) => {
+                const isSelected = selectedFarm?.id === farm.id;
+                const hasBoundary = Boolean(parseGeoJsonToLeaflet(farm.boundaryGeoJson));
+
+                return (
+                  <Marker
+                    key={farm.id}
+                    position={[farm.latitude, farm.longitude]}
+                    icon={farmIcon}
+                    eventHandlers={{
+                      click: () => {
+                        setSelectedFarm(farm);
+                        if (farm.countryCode) setSelectedCountryCode(farm.countryCode);
+                        setRightPanelOpen(true);
+                        handleMapLocationClick(farm.latitude, farm.longitude);
+                        openContextDrawer({
+                          type: 'farm',
+                          title: farm.name,
+                          subtitle: `${farm.region || farm.adminLevel1 || ''}, ${farm.country}`,
+                          badge: farm.cropProvenance || 'FIELD_VERIFIED RESEARCH',
+                          badgeColor: 'green',
+                          data: farm,
+                          provenance: {
+                            source: 'Institutional Research Registry / Farmer Observation',
+                            status: 'LIVE',
+                            spatialResolution: hasBoundary ? 'Verified Polygon Boundary' : 'Point Coordinates (Boundary Not Registered)',
+                            limitations: 'Soil and climate data are mapped from coordinate point query to ISRIC and CHIRPS.',
+                          },
+                        });
+                      }
+                    }}
+                  >
+                    <Popup>
+                      <div className="p-1 max-w-[220px] font-sans text-xs">
+                        <div className="text-[10px] text-[#2ECC71] font-bold uppercase">
+                          {hasBoundary ? 'Verified Farm Boundary' : 'Farm Location Point'}
+                        </div>
+                        <strong className="text-white block mt-0.5">{farm.name}</strong>
+                        <div className="text-[11px] text-white">Planted: <strong>{farm.currentCrop}</strong></div>
+                        <div className="text-[10px] text-[#A0AEC0]">{farm.region || farm.adminLevel1}, {farm.country}</div>
+                        {!hasBoundary && (
+                          <div className="mt-1 text-[9px] text-amber-300 italic">
+                            Farm location point — boundary not registered
+                          </div>
+                        )}
+                        {recommendedCrop && isSelected && (
+                          <div className="mt-1.5 pt-1 border-t border-white/20 text-[10px] text-[#2ECC71] font-bold">
+                            Recommended: {recommendedCrop} {recommendationScore ? `(${recommendationScore}/100)` : ''}
+                          </div>
+                        )}
+                        <div className="text-[9px] text-[#2ECC71] mt-1 font-bold">Click marker to inspect details →</div>
+                      </div>
+                    </Popup>
+                  </Marker>
+                );
+              })}
           </MapContainer>
 
           {/* DYNAMIC MAP LEGEND */}
@@ -1110,10 +1270,12 @@ export const MapPage: React.FC = () => {
                   <span className="text-2xl">{currentCountry?.flag || '🇪🇹'}</span>
                   <div>
                     <h3 className="font-bold text-base text-white leading-tight">
-                      {currentCountry?.name || 'Ethiopia'}
+                      {selectedFarm ? selectedFarm.name : (currentCountry?.name || 'Ethiopia')}
                     </h3>
                     <p className="text-[11px] text-[#8EB897]">
-                      Capital: {currentCountry?.capital || 'Addis Ababa'}
+                      {selectedFarm 
+                        ? `${selectedFarm.region || selectedFarm.adminLevel1 || ''}, ${selectedFarm.country}` 
+                        : `Capital: ${currentCountry?.capital || 'Addis Ababa'}`}
                     </p>
                   </div>
                 </div>
@@ -1128,6 +1290,172 @@ export const MapPage: React.FC = () => {
                   </button>
                 </div>
               </div>
+
+              {/* ─────────────────────────────────────────────────────────────
+                  SECTION: ACTIVE FARM RECOMMENDATION SPATIAL DOSSIER
+              ───────────────────────────────────────────────────────────── */}
+              {selectedFarm && (
+                <div className="p-4 bg-[#0C1B14]/95 rounded-2xl border border-[#2ECC71]/40 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#0C1B14] bg-[#2ECC71] px-2 py-0.5 rounded font-mono">
+                      RECOMMENDATION SPATIAL DOSSIER
+                    </span>
+                    <span className="text-[10px] text-[#8EB897] font-mono">ID: {selectedFarm.id}</span>
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="flex items-baseline justify-between">
+                      <h4 className="text-sm font-bold text-white">{selectedFarm.name}</h4>
+                      <span className="text-xs text-[#2ECC71] font-semibold">
+                        {selectedFarm.cropProvenance === 'FIELD_VERIFIED' ? 'Field Verified' : selectedFarm.cropProvenance}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-[#A0AEC0]">
+                      Centroid: <strong className="text-white">{selectedFarm.latitude.toFixed(4)}°N, {selectedFarm.longitude.toFixed(4)}°E</strong>
+                    </div>
+                  </div>
+
+                  {/* Spatial Boundary & Area Comparison */}
+                  <div className="p-2.5 rounded-xl bg-[#132A20] border border-[#8EB897]/20 space-y-1.5 text-[11px]">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#8EB897]">Boundary Registration:</span>
+                      {farmSpatial?.hasBoundary || selectedFarm.boundaryGeoJson ? (
+                        <span className="text-[#2ECC71] font-bold flex items-center gap-1">
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          <span>Verified Polygon</span>
+                        </span>
+                      ) : (
+                        <span className="text-amber-400 font-bold flex items-center gap-1">
+                          <MapPin className="w-3.5 h-3.5" />
+                          <span>Point Location Only</span>
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#8EB897]">Registered Farm Area:</span>
+                      <strong className="text-white">{selectedFarm.size} hectares</strong>
+                    </div>
+
+                    {farmSpatial?.calculatedAreaHectares && (
+                      <div className="flex items-center justify-between text-[#2ECC71]">
+                        <span>Calculated Polygon Area:</span>
+                        <strong className="font-mono">{farmSpatial.calculatedAreaHectares} ha</strong>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#8EB897]">Preceding Crop:</span>
+                      <strong className="text-white">{selectedFarm.currentCrop}</strong>
+                    </div>
+
+                    {selectedFarm.plots && selectedFarm.plots.length > 0 && (
+                      <div className="pt-1.5 border-t border-[#8EB897]/15">
+                        <span className="text-[10px] text-[#38BDF8] font-bold block mb-1">
+                          Registered Sub-field Zones ({selectedFarm.plots.length}):
+                        </span>
+                        <div className="space-y-1">
+                          {selectedFarm.plots.map((p) => (
+                            <div key={p.id} className="flex items-center justify-between text-[10px] text-white bg-[#0C1B14] p-1.5 rounded-lg border border-[#8EB897]/15">
+                              <span>{p.name} ({p.cropName})</span>
+                              <span className="text-[#38BDF8] font-mono">{p.areaHectares} ha</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Recommended Crop Candidates for this Farm */}
+                  {recommendedCrop && (
+                    <div className="p-3 bg-[#132A20] rounded-xl border border-[#2ECC71]/30 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase text-[#8EB897]">Selected Recommendation:</span>
+                        {recommendationScore && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-[#2ECC71] text-[#0C1B14]">
+                            Score: {recommendationScore}/100
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-bold text-white flex items-center gap-1.5">
+                          <Sprout className="w-4 h-4 text-[#2ECC71]" />
+                          {recommendedCrop}
+                        </span>
+                        <span className="text-[10px] text-[#8EB897]">
+                          Sequence: {selectedFarm.currentCrop} &rarr; {recommendedCrop}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-[#A0AEC0] italic leading-tight">
+                        Map highlighting the registered boundary for whole-farm rotation planning.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Switching between recommended crops updates map info */}
+                  {farmRecCandidates.length > 0 && (
+                    <div className="space-y-1.5">
+                      <span className="text-[10px] text-[#8EB897] font-semibold block">
+                        Switch Recommended Crop:
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {farmRecCandidates.map((c) => {
+                          const isCurrentRec = recommendedCrop === c.cropName;
+                          return (
+                            <button
+                              key={c.cropId}
+                              onClick={() => {
+                                setRecommendedCrop(c.cropName);
+                                setRecommendationScore(c.overallScore);
+                              }}
+                              className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all ${
+                                isCurrentRec
+                                  ? 'bg-[#2ECC71] text-[#0C1B14] font-bold shadow-sm'
+                                  : 'bg-[#132A20] text-[#8EB897] hover:text-white border border-[#8EB897]/20'
+                              }`}
+                            >
+                              <span>{c.cropName}</span>
+                              <span className="ml-1 opacity-80 font-mono">({c.overallScore})</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="pt-2 border-t border-[#8EB897]/20 flex items-center justify-between">
+                    <Link
+                      to={`/rotation-planner`}
+                      className="text-[11px] text-[#2ECC71] hover:underline font-semibold flex items-center gap-1"
+                    >
+                      <span>Return to Rotation Planner</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </Link>
+
+                    <button
+                      onClick={() =>
+                        openContextDrawer({
+                          type: 'farm',
+                          title: selectedFarm.name,
+                          subtitle: `${selectedFarm.region || selectedFarm.adminLevel1 || ''}, ${selectedFarm.country}`,
+                          badge: selectedFarm.cropProvenance || 'FIELD_VERIFIED RESEARCH',
+                          badgeColor: 'green',
+                          data: selectedFarm,
+                          provenance: {
+                            source: 'Institutional Research Registry / Farmer Observation',
+                            status: 'LIVE',
+                            spatialResolution: farmSpatial?.hasBoundary ? 'Verified Polygon Boundary' : 'Point Coordinates',
+                            limitations: 'Soil and climate data are mapped from coordinate point query to ISRIC and CHIRPS.',
+                          },
+                        })
+                      }
+                      className="px-2.5 py-1 bg-[#132A20] hover:bg-[#1a382b] text-white text-[10px] font-bold rounded-lg border border-[#8EB897]/25"
+                    >
+                      Scientific Dossier
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* SECTION: SELECTED SUB-CITY / RURAL DISTRICT AGRONOMY */}
               {selectedDistrict && (

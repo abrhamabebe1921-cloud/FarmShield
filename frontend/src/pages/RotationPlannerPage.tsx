@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
 import {
   Compass,
   ArrowRight,
@@ -6,15 +7,21 @@ import {
   AlertTriangle,
   Info,
   Globe,
+  MapPin,
+  Map,
+  Sprout,
+  ShieldCheck,
+  Sparkles
 } from 'lucide-react';
 import { Radar } from 'react-chartjs-2';
 import '../utils/chartSetup';
 import { useFarmShield } from '../context/FarmShieldContext';
 import { FarmShieldApi } from '../services/api';
-import { RotationEvaluation } from '../types';
+import { RotationEvaluation, CropRecommendationCandidate, FarmSpatialMetadata } from '../types';
 import { DataSourceBadge } from '../components/common/DataSourceBadge';
 
 export const RotationPlannerPage: React.FC = () => {
+  const navigate = useNavigate();
   const { farms, selectedFarm, setSelectedFarm, crops, selectedCountry, openContextDrawer } = useFarmShield();
 
   // State for planner selections
@@ -22,12 +29,39 @@ export const RotationPlannerPage: React.FC = () => {
   const [proposedCrops, setProposedCrops] = useState<string[]>(['Faba Bean']);
   const [evaluation, setEvaluation] = useState<RotationEvaluation | null>(null);
 
-  // Sync currentCrop when selectedFarm changes
+  // State for AI-ranked crop candidate recommendations for the target farm
+  const [recommendations, setRecommendations] = useState<CropRecommendationCandidate[]>([]);
+  const [spatialMeta, setSpatialMeta] = useState<FarmSpatialMetadata | null>(null);
+  const [loadingRecs, setLoadingRecs] = useState<boolean>(false);
+
+  // Sync currentCrop and load recommendations when selectedFarm changes
   useEffect(() => {
     if (selectedFarm) {
       setCurrentCrop(selectedFarm.currentCrop);
+      loadFarmRecommendations(selectedFarm.id);
     }
   }, [selectedFarm]);
+
+  const loadFarmRecommendations = async (farmId: string) => {
+    try {
+      setLoadingRecs(true);
+      const res = await FarmShieldApi.getFarmRecommendations(farmId);
+      if (res.success && res.data) {
+        if (res.data.data && res.data.data.recommendations) {
+          setRecommendations(res.data.data.recommendations);
+        } else if (res.data.recommendations) {
+          setRecommendations(res.data.recommendations);
+        }
+        if (res.data.spatial) {
+          setSpatialMeta(res.data.spatial);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to load farm recommendations:', err);
+    } finally {
+      setLoadingRecs(false);
+    }
+  };
 
   // Run rotation evaluation whenever farm, current crop, or proposed sequence changes
   useEffect(() => {
@@ -36,6 +70,14 @@ export const RotationPlannerPage: React.FC = () => {
         .then((res) => setEvaluation(res.data));
     }
   }, [selectedFarm, currentCrop, proposedCrops]);
+
+  // Handler to view specific recommendation on interactive map
+  const handleViewOnMap = (cropName: string, score?: number) => {
+    if (!selectedFarm) return;
+    const cropId = cropName.toLowerCase().replace(/[\s\(\)]+/g, '_');
+    const recScore = score || evaluation?.overallScore || 85;
+    navigate(`/map?farmId=${encodeURIComponent(selectedFarm.id)}&crop=${encodeURIComponent(cropId)}&score=${encodeURIComponent(recScore)}`);
+  };
 
   // Available rotation options based on active country applicability
   const availableRotationCandidates = crops.filter(
@@ -261,30 +303,39 @@ export const RotationPlannerPage: React.FC = () => {
                       <span>{evaluation.proposedSequence.join(' → ')}</span>
                     </div>
                   </div>
-                  <button
-                    onClick={() =>
-                      openContextDrawer({
-                        type: 'rotation',
-                        title: `${evaluation.currentCrop} → ${evaluation.proposedSequence.join(' → ')}`,
-                        subtitle: `Decision Score: ${evaluation.overallScore}/100 (${evaluation.overallAssessment})`,
-                        badge: evaluation.overallAssessment,
-                        badgeColor: evaluation.overallAssessment === 'Highly Recommended' ? 'green' : 'orange',
-                        data: {
-                          ...evaluation,
-                          currentCrop: evaluation.currentCrop,
-                          nextCrop: evaluation.proposedSequence.join(' → '),
-                        },
-                        provenance: {
-                          source: 'FarmShield Explainable Rule Engine + CHIRPS/NASA POWER/SoilGrids',
-                          status: 'LIVE',
-                        },
-                      })
-                    }
-                    className="px-3 py-1.5 rounded-xl bg-[#244C3A] text-[#FFFEFA] font-bold text-xs hover:bg-[#1B3B2D] transition-colors flex items-center gap-1.5 self-start sm:self-end"
-                  >
-                    <Info className="w-3.5 h-3.5" />
-                    <span>View Scientific Evidence</span>
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2 self-start sm:self-end">
+                    <button
+                      onClick={() => handleViewOnMap(proposedCrops[0] || 'Faba Bean', evaluation.overallScore)}
+                      className="px-3.5 py-1.5 rounded-xl bg-[#2ECC71] text-[#0C1B14] font-bold text-xs hover:bg-[#27ae60] shadow-sm transition-all flex items-center gap-1.5"
+                    >
+                      <Map className="w-3.5 h-3.5" />
+                      <span>View on Map</span>
+                    </button>
+                    <button
+                      onClick={() =>
+                        openContextDrawer({
+                          type: 'rotation',
+                          title: `${evaluation.currentCrop} → ${evaluation.proposedSequence.join(' → ')}`,
+                          subtitle: `Decision Score: ${evaluation.overallScore}/100 (${evaluation.overallAssessment})`,
+                          badge: evaluation.overallAssessment,
+                          badgeColor: evaluation.overallAssessment === 'Highly Recommended' ? 'green' : 'orange',
+                          data: {
+                            ...evaluation,
+                            currentCrop: evaluation.currentCrop,
+                            nextCrop: evaluation.proposedSequence.join(' → '),
+                          },
+                          provenance: {
+                            source: 'FarmShield Explainable Rule Engine + CHIRPS/NASA POWER/SoilGrids',
+                            status: 'LIVE',
+                          },
+                        })
+                      }
+                      className="px-3 py-1.5 rounded-xl bg-[#244C3A] text-[#FFFEFA] font-bold text-xs hover:bg-[#1B3B2D] transition-colors flex items-center gap-1.5"
+                    >
+                      <Info className="w-3.5 h-3.5" />
+                      <span>Scientific Evidence</span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -421,6 +472,136 @@ export const RotationPlannerPage: React.FC = () => {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ─────────────────────────────────────────────────────────────
+          SECTION: ALL RECOMMENDED CROPS FOR TARGET FARM (MAP LINKED)
+      ───────────────────────────────────────────────────────────── */}
+      {selectedFarm && (
+        <div className="bg-[#FFFEFA] rounded-3xl border border-[#E4E4D9] shadow-natural-xs p-6 sm:p-8 space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#E4E4D9] pb-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="p-1.5 rounded-lg bg-[#E5EBDD] text-[#244C3A]">
+                  <Sprout className="w-4 h-4" />
+                </span>
+                <h3 className="text-base sm:text-lg font-bold text-[#244C3A]">
+                  Explainable Crop Recommendations for {selectedFarm.name}
+                </h3>
+              </div>
+              <p className="text-xs text-[#748077] mt-1">
+                Spatial parcel: {selectedFarm.latitude.toFixed(4)}°N, {selectedFarm.longitude.toFixed(4)}°E • Preceding crop: <strong className="text-[#244C3A]">{selectedFarm.currentCrop}</strong>
+                {spatialMeta?.hasBoundary && (
+                  <span className="ml-2 inline-flex items-center gap-1 text-[11px] font-bold text-[#244C3A] bg-[#E5EBDD] px-2 py-0.5 rounded-md">
+                    <ShieldCheck className="w-3 h-3 text-[#72966F]" />
+                    Verified Boundary ({spatialMeta.calculatedAreaHectares || selectedFarm.size} ha)
+                  </span>
+                )}
+                {!spatialMeta?.hasBoundary && (
+                  <span className="ml-2 inline-flex items-center gap-1 text-[11px] font-bold text-[#BC6935] bg-[#FAECE1] px-2 py-0.5 rounded-md">
+                    <MapPin className="w-3 h-3 text-[#D98245]" />
+                    Point Location (Boundary Not Registered)
+                  </span>
+                )}
+              </p>
+            </div>
+
+            <Link
+              to={`/map?farmId=${encodeURIComponent(selectedFarm.id)}`}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#244C3A] hover:bg-[#1B3B2D] text-white text-xs font-bold shadow-sm transition-all self-start sm:self-auto"
+            >
+              <Map className="w-4 h-4 text-[#2ECC71]" />
+              <span>Explore Farm on Map</span>
+            </Link>
+          </div>
+
+          {loadingRecs ? (
+            <div className="p-8 text-center text-xs text-[#748077]">
+              Evaluating explainable rotation candidates against soil & climate layers...
+            </div>
+          ) : recommendations.length === 0 ? (
+            <div className="p-6 text-center text-xs text-[#748077] bg-[#F3F1E9] rounded-2xl">
+              No additional crop candidates generated for this agroclimatic zone.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {recommendations.map((rec) => {
+                const isSelected = proposedCrops[0] === rec.cropName;
+                return (
+                  <div
+                    key={rec.cropId}
+                    className={`p-5 rounded-2xl border transition-all flex flex-col justify-between ${
+                      isSelected
+                        ? 'bg-[#E5EBDD]/60 border-[#244C3A] shadow-md ring-2 ring-[#244C3A]/20'
+                        : 'bg-[#FFFEFA] border-[#E4E4D9] hover:border-[#72966F]'
+                    }`}
+                  >
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-[#748077] bg-[#F3F1E9] px-2 py-0.5 rounded-md">
+                          {rec.category}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-extrabold text-[#244C3A]">
+                            {rec.overallScore}
+                          </span>
+                          <span className="text-[10px] text-[#748077]">/ 100</span>
+                        </div>
+                      </div>
+
+                      <div>
+                        <h4 className="text-base font-bold text-[#244C3A]">{rec.cropName}</h4>
+                        <p className="text-[11px] text-[#748077]">{rec.family} • {rec.growingDurationDays}</p>
+                      </div>
+
+                      {rec.nitrogenFixation && (
+                        <div className="inline-flex items-center gap-1 text-[10px] font-bold text-[#244C3A] bg-[#E5EBDD] px-2 py-0.5 rounded-md">
+                          <Sparkles className="w-3 h-3 text-[#2ECC71]" />
+                          Biological Nitrogen Fixation
+                        </div>
+                      )}
+
+                      <div className="space-y-1 text-xs text-[#29332D]">
+                        <span className="text-[10px] font-bold uppercase text-[#748077] block">Key Evidence:</span>
+                        <ul className="space-y-1 text-[11px] text-[#748077]">
+                          {rec.supportingObservations.slice(0, 2).map((obs, idx) => (
+                            <li key={idx} className="flex items-start gap-1.5">
+                              <span className="text-[#72966F] font-bold">•</span>
+                              <span className="line-clamp-2">{obs}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+
+                    <div className="pt-4 mt-4 border-t border-[#E4E4D9] flex items-center justify-between gap-2">
+                      <button
+                        onClick={() => {
+                          setProposedCrops([rec.cropName]);
+                        }}
+                        className={`px-3 py-1.5 text-xs font-semibold rounded-xl transition-all ${
+                          isSelected
+                            ? 'bg-[#244C3A] text-white font-bold'
+                            : 'bg-[#F3F1E9] text-[#244C3A] hover:bg-[#E5EBDD]'
+                        }`}
+                      >
+                        {isSelected ? 'Active Sequence' : 'Test Pair'}
+                      </button>
+
+                      <button
+                        onClick={() => handleViewOnMap(rec.cropName, rec.overallScore)}
+                        className="px-3 py-1.5 text-xs font-bold rounded-xl bg-[#2ECC71] text-[#0C1B14] hover:bg-[#27ae60] shadow-sm transition-all flex items-center gap-1.5"
+                      >
+                        <Map className="w-3.5 h-3.5" />
+                        <span>View on Map</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -166,6 +166,7 @@ export interface Crop {
   suitableTemperatureCelsius: { min: number; max: number; optimal: { min: number; max: number } };
   soilPhRange: { min: number; max: number };
   suitableSoilTypes: SoilType[];
+  soilPreference?: string[];
   rootCharacteristics: {
     depthCm: { min: number; max: number };
     systemType: 'Taproot' | 'Fibrous' | 'Adventitious';
@@ -453,6 +454,27 @@ export interface CropRecommendationCandidate {
   growingDurationDays: string;
 }
 
+export interface FarmSpatialMetadata {
+  farmId: string;
+  farmName: string;
+  latitude: number;
+  longitude: number;
+  registeredSizeHectares: number;
+  calculatedAreaHectares?: number | null;
+  geometryType: 'POLYGON' | 'POINT';
+  boundaryGeoJson?: any;
+  hasBoundary: boolean;
+  geometryProvenance: 'FIELD_VERIFIED' | 'FARMER_REPORTED' | 'SATELLITE_CLASSIFIED' | 'DEMONSTRATION' | 'ESTIMATED' | 'UNKNOWN';
+  recommendationDate: string;
+  plots?: Array<{
+    id: string;
+    name: string;
+    cropName: string;
+    areaHectares: number;
+    boundaryGeoJson?: any;
+  }>;
+}
+
 export interface FarmCropRecommendations {
   farmLocation: {
     latitude: number;
@@ -467,11 +489,22 @@ export interface FarmCropRecommendations {
     soilClayPercentage: number;
     droughtSpi3: number;
     waterAvailability: string;
+    storedEcostressSoilMoistureM3m3?: number;
+    storedGpmPrecipitationMm?: number;
   };
   recommendations: CropRecommendationCandidate[];
   missingInformation: string[];
   disclaimer: string;
   sources: { name: string; parameter: string }[];
+}
+
+export interface FarmRecommendationApiResponse {
+  success: boolean;
+  farmId: string;
+  farmName: string;
+  currentCrop: string;
+  spatial?: FarmSpatialMetadata;
+  data: FarmCropRecommendations;
 }
 
 export interface FarmDataQualityDomainEvaluation {

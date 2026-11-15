@@ -2,19 +2,12 @@
 FarmShield AI Agricultural Assistant Service
 ============================================
 Provides agronomic explanations, climate context, and decision support
-strictly grounded in FarmShield's verified datasets, scientific formulas,
-and explainable recommendation engine.
-
-ARCHITECTURE RULES (Phase 4.1):
-1. Configurable AI provider interface (supports Gemini API, Anthropic, or Local Grounded Engine).
-2. API keys stored strictly in backend environment variables (never frontend).
-3. If no external API key is configured, operates in verified deterministic Knowledge Base mode.
-4. Two distinct capabilities:
-   - Capability A: AI Agricultural Assistant (rainfall, soil, vegetation/NDVI, drought SPI, reports).
-   - Capability B: AI Crop Advisor (crop suitability, planting windows, rotation plans, biological synergy).
-5. AI responses are strictly separate from measured scientific values.
-6. Never invents synthetic weather observations, satellite NDVI, or fake soil numbers.
-7. Transparently provides source citations and dataset provenance.
+grounded in FarmShield's registered database:
+- Registered Farms & Fields (names, coordinates, soil types, crops, sizes)
+- Crop Database (25 botanical profiles, thermal/water requirements, soil preferences)
+- Environmental Observations (NASA POWER, SoilGrids, NASA GPM, ECOSTRESS)
+- Soil Type Identification & Agronomic Management Rules
+- CHIRPS Precipitation & WMO SPI Drought Indices
 """
 
 import os
@@ -27,168 +20,275 @@ class AIAssistantService:
         self.api_key = os.environ.get("FARMSHIELD_AI_API_KEY") or os.environ.get("GEMINI_API_KEY")
         self.provider = "gemini" if self.api_key else "knowledge_base_engine"
 
+    def _query_database_context(self, message: str, farm_context: Optional[Dict[str, Any]] = None, country_code: str = "ET") -> Dict[str, Any]:
+        """
+        Retrieves real registered data from the FarmShield SQLite database:
+        - Matching farms
+        - Matching crops
+        - Live environmental observations for the farm or country
+        """
+        db_context: Dict[str, Any] = {
+            "farms": [],
+            "matched_crops": [],
+            "observations": [],
+            "total_farms": 0,
+            "total_crops": 0,
+        }
+
+        try:
+            from models.farm import Farm
+            from models.crop import CropModel
+            from models.environmental_observation import EnvironmentalObservation
+
+            # 1. Query registered farms
+            all_farms = Farm.query.all()
+            db_context["total_farms"] = len(all_farms)
+            farm_list = []
+            for f in all_farms:
+                d = f.to_dict()
+                farm_list.append({
+                    "id": d.get("id"),
+                    "name": d.get("name"),
+                    "countryCode": d.get("countryCode"),
+                    "currentCrop": d.get("currentCrop"),
+                    "soilType": d.get("soilType"),
+                    "size": d.get("size") or d.get("sizeHectares"),
+                    "waterAvailability": d.get("waterAvailability"),
+                    "adminLevel1": d.get("adminLevel1") or d.get("region"),
+                    "adminLevel2": d.get("adminLevel2") or d.get("zone"),
+                    "latitude": d.get("latitude"),
+                    "longitude": d.get("longitude"),
+                    "hasBoundary": bool(d.get("boundaryGeoJson")),
+                    "plotsCount": len(d.get("plots", []))
+                })
+            db_context["farms"] = farm_list
+
+            # 2. Query crops matching keywords in message
+            all_crops = CropModel.query.all()
+            db_context["total_crops"] = len(all_crops)
+            msg_lower = message.lower()
+            matched_crops = []
+            for c in all_crops:
+                c_dict = c.to_dict()
+                c_name = c_dict.get("name", "").lower()
+                c_id = c_dict.get("id", "").lower()
+                c_sci = c_dict.get("scientificName", "").lower()
+                if c_name in msg_lower or c_id in msg_lower or c_sci in msg_lower or (c_name and any(w in msg_lower for w in c_name.split())):
+                    matched_crops.append({
+                        "id": c_dict.get("id"),
+                        "name": c_dict.get("name"),
+                        "category": c_dict.get("category"),
+                        "growingDuration": c_dict.get("growingDurationDays"),
+                        "waterNeeds": c_dict.get("waterRequirementsMm"),
+                        "optimalTemp": c_dict.get("suitableTemperatureCelsius", {}).get("optimal"),
+                        "soilPreference": c_dict.get("soilPreference"),
+                        "nitrogenFixing": c_dict.get("nitrogenFixation", {}).get("capable", False)
+                    })
+            db_context["matched_crops"] = matched_crops[:4]
+
+            # 3. Query observations for active farm or country
+            target_farm_id = farm_context.get("id") if farm_context else None
+            obs_query = EnvironmentalObservation.query
+            if target_farm_id:
+                farm_obs = obs_query.filter_by(farm_id=target_farm_id).limit(10).all()
+            else:
+                farm_obs = obs_query.filter_by(country_code=country_code).limit(10).all()
+
+            if farm_obs:
+                db_context["observations"] = [
+                    {
+                        "dataset": o.dataset_id,
+                        "variable": o.variable_name,
+                        "value": o.value,
+                        "unit": o.unit,
+                        "date": o.observation_date,
+                        "provenance": o.provenance
+                    } for o in farm_obs
+                ]
+
+        except Exception as e:
+            db_context["query_error"] = str(e)
+
+        return db_context
+
     def query_assistant(
         self,
         message: str,
         farm_context: Optional[Dict[str, Any]] = None,
         country_code: Optional[str] = "ET",
-        capability: Optional[str] = "assistant"  # "assistant" or "advisor"
+        capability: Optional[str] = "assistant"
     ) -> Dict[str, Any]:
         """
-        Processes a farmer's or agronomist's inquiry, enriching with active farm
-        observational context and returning an explainable agronomic advisory.
+        Processes an inquiry by querying the database for context
+        and formulating a grounded, accurate response.
         """
         msg_lower = message.lower().strip()
         timestamp = datetime.now(timezone.utc).isoformat()
+        clean_country = country_code or "ET"
 
-        # Check if live external API provider is configured
+        # Pull real database data
+        db_context = self._query_database_context(message, farm_context, clean_country)
+
+        # Check if live external LLM is configured
         if self.api_key and self.provider == "gemini":
-            return self._call_live_llm(message, farm_context, country_code, capability)
+            return self._call_live_llm(message, farm_context, clean_country, capability, db_context)
 
-        # Grounded rule-based Knowledge Base Engine
-        return self._generate_grounded_response(msg_lower, farm_context, country_code or "ET", capability)
+        # Grounded rule-based Knowledge Base & Database Engine
+        return self._generate_grounded_response(msg_lower, farm_context, clean_country, capability, db_context)
 
     def _generate_grounded_response(
         self,
         msg: str,
         farm: Optional[Dict[str, Any]],
         country_code: str,
-        capability: Optional[str] = "assistant"
+        capability: Optional[str],
+        db_data: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """
-        Deterministic, verified agronomic advisory based on FarmShield scientific rules.
-        Handles both Capability A (Agricultural Assistant) and Capability B (Crop Advisor).
-        """
         timestamp = datetime.now(timezone.utc).isoformat()
-        farm_name = farm.get("name", "your farm") if farm else "your farm"
-        soil_type = farm.get("soilType", "clay loam") if farm else "local soil"
-        water_avail = farm.get("waterAvailability", "Rainfed") if farm else "Rainfed"
-        current_crop = farm.get("currentCrop", "field crops") if farm else "field crops"
-        region = (farm.get("region") or farm.get("adminLevel1") or "agricultural zone") if farm else "agricultural zone"
+        farms = db_data.get("farms", [])
+        matched_crops = db_data.get("matched_crops", [])
+        observations = db_data.get("observations", [])
+
+        # Active farm context from client or first registered farm
+        if farm and farm.get("name"):
+            active_farm = farm
+        elif farms:
+            active_farm = farms[0]
+        else:
+            active_farm = {
+                "name": "your farm",
+                "soilType": "Vertisols (Black clay)",
+                "waterAvailability": "Rainfed",
+                "currentCrop": "Teff",
+                "size": 5.0
+            }
+
+        farm_name = active_farm.get("name", "your farm")
+        soil_type = active_farm.get("soilType", "Vertisols (Black clay)")
+        water_avail = active_farm.get("waterAvailability", "Rainfed")
+        current_crop = active_farm.get("currentCrop", "field crops")
+        farm_size = active_farm.get("size") or active_farm.get("sizeHectares", 5.0)
 
         citations = [
-            {"source": "FarmShield Scientific Core", "version": "4.1.0"},
-            {"source": "WMO Standardized Precipitation Index (SPI) Guidelines", "type": "Meteorological"},
-            {"source": "National Agricultural Research Calendars (EIAR/KALRO/IITA/CSIR/ARC)", "type": "Agronomic"}
+            {"source": "FarmShield SQLite Database (Farms, Crops & Soil Profiles)", "version": "4.1.0"},
+            {"source": "ISRIC SoilGrids & NASA Agroclimatology Observations", "type": "Pedological / Climate"}
         ]
 
-        # -------------------------------------------------------------
-        # CAPABILITY B: AI CROP ADVISOR
-        # -------------------------------------------------------------
-        if capability == "advisor" or any(w in msg for w in ["suitability", "which crop", "rotation plan", "planting window", "risk of planting", "seed"]):
-            if "rotation" in msg or "sequence" in msg or "break crop" in msg:
+        # -----------------------------------------------------------------
+        # 1. DATABASE QUERIES ABOUT REGISTERED FARMS
+        # -----------------------------------------------------------------
+        if any(w in msg for w in ["how many farms", "list farms", "registered farms", "show farms", "my farms", "farm count", "database farm"]):
+            if farms:
+                farm_lines = "\n".join([
+                    f"• {f['name']} ({f.get('adminLevel1') or 'Region'}, {f.get('countryCode')}): {f.get('size')} ha | Soil: {f.get('soilType')} | Current: {f.get('currentCrop')} | {'Boundary Verified' if f.get('hasBoundary') else 'Point Only'}"
+                    for f in farms
+                ])
                 response_text = (
-                    f"Crop Rotation Advisory for {farm_name} (current crop: {current_crop}):\n\n"
-                    "• Agronomic Rule: Consecutive planting of botanical relatives (e.g. Maize after Sorghum, or Teff after Wheat) "
-                    "multiplies root fungal pathogens (Fusarium, Pythium) and depletes specific soil nutrient zones.\n"
-                    "• Recommended Sequence: Break heavy nitrogen consumers with an atmospheric nitrogen-fixing legume "
-                    "(e.g. Faba Bean, Chickpea, or Cowpea depending on altitude). Legume nodules fix 40–80 kg N/ha, "
-                    "reducing synthetic fertilizer requirements for the subsequent cereal crop.\n"
-                    "• Disease Break: A minimum 1-year legume or oilseed break dramatically suppresses cereal rusts and stalk borers."
+                    f"Database Farm Registry ({len(farms)} registered parcels in database):\n\n"
+                    f"{farm_lines}\n\n"
+                    f"Active Focus: {farm_name} ({soil_type}, {water_avail})."
                 )
-                topic = "Crop Rotation & Sequence Advisory"
-            elif "window" in msg or "calendar" in msg or "when to plant" in msg:
-                response_text = (
-                    f"Planting Window Advisory ({country_code} - {region}):\n\n"
-                    "• Onset Timing: Planting should commence once topsoil receives at least 25–30 mm of cumulative rainfall "
-                    "over a 3-day window without immediate dry spell forecast.\n"
-                    "• Agroecological Alignment: Consult FarmShield's verified national crop calendar for specific maturity classes. "
-                    "In rainfed systems, planting late drastically increases late-season moisture stress risk during grain filling."
-                )
-                topic = "Planting Window & Extension Calendar"
-            elif "risk" in msg:
-                response_text = (
-                    f"Agronomic Risk Analysis for {farm_name} ({soil_type}, {water_avail}):\n\n"
-                    "1. Moisture Stress: Rainfed systems face terminal drought risk if the rainy season ends prematurely. "
-                    "Early-maturing varieties mitigate this.\n"
-                    "2. Soil Drainage: On heavy Vertisols/clays, waterlogging during peak rains damages root respiration in legumes like Chickpea.\n"
-                    "3. Monoculture Vulnerability: Repeated cultivation of a single species elevates pest pressure and strips specific micronutrients."
-                )
-                topic = "Agronomic Risk Assessment"
             else:
-                response_text = (
-                    f"Crop Suitability Advisory for {farm_name}:\n\n"
-                    f"• Soil Profile: {soil_type} provides distinct moisture holding and nutrient exchange characteristics.\n"
-                    "• Water Regime: In rainfed systems, crop selection must match historical rainfall patterns (CHIRPS).\n"
-                    "• Suitability Evaluation: Cereal staples (Maize, Teff, Sorghum) thrive when paired in alternating cycles with "
-                    "nitrogen-fixing legumes. For detailed quantitative suitability scores, inspect FarmShield's rule-based Crop Database."
-                )
-                topic = "Crop Suitability Advisory"
+                response_text = "There are currently no registered farms stored in the local database. You can register new parcels on the 'Register Farm & Map Boundary' page."
+            topic = "Database Farm Inventory"
 
-        # -------------------------------------------------------------
-        # CAPABILITY A: AI AGRICULTURAL ASSISTANT
-        # -------------------------------------------------------------
-        elif "soil" in msg or "ph" in msg or "fertility" in msg or "clay" in msg:
+        # -----------------------------------------------------------------
+        # 2. DATABASE QUERIES ABOUT CROPS
+        # -----------------------------------------------------------------
+        elif matched_crops:
+            crop_summaries = []
+            for c in matched_crops:
+                n_fix = "Yes (Biological N-Fixing Legume)" if c.get("nitrogenFixing") else "No (Nitrogen Feeder)"
+                crop_summaries.append(
+                    f"🌿 **{c['name']}** ({c['category']}):\n"
+                    f"  - Growing Duration: {c.get('growingDuration', {}).get('min', 90)}–{c.get('growingDuration', {}).get('max', 120)} days\n"
+                    f"  - Seasonal Water Needs: {c.get('waterNeeds', {}).get('min', 300)}–{c.get('waterNeeds', {}).get('max', 600)} mm\n"
+                    f"  - Thermal Optimum: {c.get('optimalTemp', {}).get('min', 18)}°C – {c.get('optimalTemp', {}).get('max', 26)}°C\n"
+                    f"  - Soil Preference: {', '.join(c.get('soilPreference', ['Loams']))}\n"
+                    f"  - Nitrogen Dynamic: {n_fix}"
+                )
             response_text = (
-                f"Soil Health & Edaphic Dynamics for {farm_name}:\n\n"
-                f"• Texture Baseline: {soil_type}.\n"
-                "• Soil pH Importance: Soil pH governs nutrient bio-availability. A pH between 6.0 and 7.2 optimizes phosphorus "
-                "uptake. In strongly acidic soils (pH < 5.5), aluminium toxicity inhibits root elongation, requiring agricultural lime. "
-                "In alkaline soils (pH > 7.8), zinc and iron micronutrient uptake is constrained.\n"
-                "• Organic Carbon: Maintaining active organic matter improves water retention in sandy soils and aeration in heavy clays."
+                f"Database Crop Profiles matching your query:\n\n"
+                + "\n\n".join(crop_summaries) + "\n\n"
+                f"Grounded Context for {farm_name} ({soil_type}): Check if the preferred soil aligns with your active farm's edaphic conditions."
+            )
+            topic = "Crop Botanical & Physiological Records"
+
+        # -----------------------------------------------------------------
+        # 3. ROTATION & CROPPING SEQUENCE INQUIRIES
+        # -----------------------------------------------------------------
+        elif "rotation" in msg or "sequence" in msg or "break crop" in msg:
+            response_text = (
+                f"Crop Rotation Advisory for {farm_name} (Database Current Crop: {current_crop}, Soil: {soil_type}):\n\n"
+                f"• Monoculture Risk: Successive cycles of {current_crop} deplete root-zone mineral reserves and accumulate host-specific pathogens.\n"
+                "• Recommended Sequence: Alternate with a biologically compatible break crop:\n"
+                "  - If preceding cereal (Teff/Wheat/Maize): Rotate with a legume (Faba Bean, Chickpea, or Cowpea) to fix 40–80 kg N/ha and restore soil crumb tilth.\n"
+                "  - Vertisol Accommodations: On heavy cracking Vertisols, chickpea performs exceptionally well on residual end-of-season moisture.\n"
+                "• Quantitative Engine: You can test the full mathematical scoring model in the Rotation Planner tool."
+            )
+            topic = "Crop Rotation & Sequence Advisory"
+
+        # -----------------------------------------------------------------
+        # 4. SOIL HEALTH, EDAPHIC PROPERTIES & SOIL TYPE DOCUMENTATION
+        # -----------------------------------------------------------------
+        elif "soil" in msg or "ph" in msg or "vertisol" in msg or "nitisol" in msg or "clay" in msg:
+            response_text = (
+                f"Soil Profile & Edaphic Properties for {farm_name}:\n\n"
+                f"• Registered Dominant Soil: {soil_type}\n"
+                f"• Water Availability Mode: {water_avail}\n"
+                "• Farmer Soil Characteristics:\n"
+                "  - Vertisols (Black clay): Heavy, cracking when dry, sticky when wet; exceptional water retention but requires drainage during peak rains (broadbed & furrow).\n"
+                "  - Nitisols (Red basaltic): Deep, porous, stable nutty crumb structure; excellent rooting depth; susceptible to phosphorus fixation.\n"
+                "  - Cambisols (Brown loamy): High natural mineral fertility, versatile, easily tilled.\n"
+                "• Soil pH & Nutrient Uptake: Near-neutral pH (6.2–7.2) optimizes nitrogen fixation and phosphorus absorption. Strongly acidic soils (<5.5) require lime."
             )
             topic = "Soil Health & Edaphic Properties"
 
-        elif "rain" in msg or "drought" in msg or "spi" in msg or "precipitation" in msg:
-            response_text = (
-                f"Rainfall & Drought Analysis for {farm_name} ({water_avail}):\n\n"
-                "• Meteorological Drought (WMO SPI): FarmShield computes 3-month (SPI-3) and 6-month (SPI-6) anomalies from CHIRPS 2.0 grids.\n"
-                "  - SPI > +1.0: Abnormally wet conditions (manage waterlogging/rusts).\n"
-                "  - -0.99 to +0.99: Near-normal moisture regime.\n"
-                "  - -1.00 to -1.49: Moderate meteorological drought.\n"
-                "  - SPI <= -1.50: Severe drought stress requiring water conservation tillage and drought-hardy crops.\n"
-                "• Distinction: Meteorological drought (precipitation deficit) precedes agricultural drought (soil moisture and crop stress)."
-            )
-            topic = "Precipitation & Drought Assessment"
+        # -----------------------------------------------------------------
+        # 5. RAINFALL, CLIMATE & ENVIRONMENTAL OBSERVATIONS
+        # -----------------------------------------------------------------
+        elif "rain" in msg or "drought" in msg or "spi" in msg or "precipitation" in msg or "weather" in msg or "climate" in msg:
+            obs_lines = ""
+            if observations:
+                obs_lines = "\n• Database Environmental Observations for Location:\n" + "\n".join([
+                    f"  - {o['dataset']} {o['variable']}: {o['value']} {o['unit']} ({o['date']})"
+                    for o in observations[:4]
+                ])
 
-        elif "ndvi" in msg or "vegetation" in msg or "satellite" in msg or "vigor" in msg:
             response_text = (
-                "Sentinel-2 Remote Sensing & NDVI Interpretation:\n\n"
-                "• Spectral Formula: NDVI = (B08 - B04) / (B08 + B04), comparing Near-Infrared (842 nm) and Red (665 nm) reflectance.\n"
-                "• Index Interpretation:\n"
-                "  - 0.60 to 0.85: Dense, vigorous green canopy with active photosynthetic biomass.\n"
-                "  - 0.35 to 0.59: Moderate canopy cover or early growth / maturing stage.\n"
-                "  - 0.15 to 0.34: Sparse vegetation or dry ground cover.\n"
-                "  - < 0.15: Bare soil, harvested stubble, or non-vegetated surfaces.\n"
-                "• Sampling Method: FarmShield extracts actual 10-meter resolution pixels centered on your farm coordinates from cloud-free COG tiles."
+                f"Precipitation & Moisture Intelligence for {farm_name} ({water_avail}):\n"
+                f"{obs_lines}\n\n"
+                "• Meteorological Drought (CHIRPS & WMO SPI):\n"
+                "  - SPI > +1.0: Abnormally wet; monitor waterlogging and fungal pressure.\n"
+                "  - -0.99 to +0.99: Normal seasonal precipitation.\n"
+                "  - SPI <= -1.50: Severe precipitation deficit; deploy drought-hardy crops and mulching."
             )
-            topic = "Satellite Vegetation Monitoring"
+            topic = "Precipitation & Environmental Observations"
 
-        elif "report" in msg or "summary" in msg or "dossier" in msg:
-            response_text = (
-                f"Farm Intelligence Report Structure for {farm_name}:\n\n"
-                "A FarmShield Comprehensive Dossier synthesizes six distinct verified layers:\n"
-                "1. NASA POWER 30-year monthly climatology (solar radiation, temperatures).\n"
-                "2. CHIRPS 2.0 satellite rainfall and WMO SPI drought metrics.\n"
-                "3. ISRIC SoilGrids 2.0 edaphic properties (pH, organic carbon, clay/sand texture).\n"
-                "4. Sentinel-2 Level-2A surface reflectance (NDVI canopy vigor).\n"
-                "5. Verified National Crop Calendar planting/harvest windows.\n"
-                "6. FAOSTAT national production and yield benchmarks."
-            )
-            topic = "Farm Report Interpretation"
-
+        # -----------------------------------------------------------------
+        # 6. GENERAL AGRONOMIC WELCOME & FEATURE GUIDE
+        # -----------------------------------------------------------------
         else:
             response_text = (
-                f"Hello! I am the FarmShield AI Agricultural Assistant. I provide scientific decision-support based on "
-                f"real remote sensing observations (CHIRPS, NASA POWER, Sentinel-2), SoilGrids edaphic models, and verified "
-                f"national planting calendars for {country_code}.\n\n"
-                "You can switch between:\n"
-                "• Assistant: Ask questions about rainfall data, soil pH, drought SPI, or satellite NDVI.\n"
-                "• Crop Advisor: Inquire about crop suitability, planting windows, rotation planning, and agronomic risks."
+                f"Hello! I am your FarmShield Agricultural AI Assistant, connected directly to your registered farm database.\n\n"
+                f"Currently tracking: **{farm_name}** ({farm_size} ha, {soil_type}, Current: {current_crop}).\n\n"
+                "You can ask me questions grounded in your live database, such as:\n"
+                "• 'Show all my registered farms in the database'\n"
+                "• 'What are the water and temperature needs for Teff, Chickpea, or Wheat?'\n"
+                "• 'What should I rotate after my current crop?'\n"
+                "• 'How do I identify and manage my Vertisol soil?'\n"
+                "• 'What are the current rainfall and environmental observations?'"
             )
-            topic = "General Agronomic Advisory"
+            topic = "Database-Connected Agronomic Assistant"
 
         return {
             "success": True,
             "response": response_text,
             "topic": topic,
-            "capability": capability,
+            "capability": capability or "assistant",
             "provider": self.provider,
             "isLiveAI": bool(self.api_key),
-            "disclaimer": (
-                "AI Advisory Notice: Explanations provide scientific decision-support derived from FarmShield observational datasets. "
-                "Always verify with local agricultural extension officers before commercial planting decisions."
-            ),
+            "disclaimer": "AI Advisory Notice: Responses are grounded in FarmShield's registered database and verified scientific extension datasets.",
             "citations": citations,
             "timestamp": timestamp
         }
@@ -198,22 +298,25 @@ class AIAssistantService:
         message: str,
         farm_context: Optional[Dict[str, Any]],
         country_code: str,
-        capability: Optional[str]
+        capability: Optional[str],
+        db_data: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """External LLM call wrapper with strict context injection."""
+        """External LLM call wrapper with strict database context injection."""
         try:
             import google.generativeai as genai
             genai.configure(api_key=self.api_key)
             model = genai.GenerativeModel("gemini-1.5-flash")
-            
+
             prompt = (
-                f"You are the FarmShield AI Agricultural Assistant & Crop Advisor for African farmers in {country_code}.\n"
+                f"You are the FarmShield AI Agricultural Assistant for African farmers in {country_code}.\n"
                 f"Role Mode: {'Crop Advisor' if capability == 'advisor' else 'Agricultural Assistant'}\n"
-                f"Farm Context: {json.dumps(farm_context or {})}\n"
+                f"Active Farm Context: {json.dumps(farm_context or {})}\n"
+                f"Database Farms & Crops Context: {json.dumps(db_data)}\n"
                 "Strict Rules:\n"
-                "- Do NOT invent measurements, current weather, or synthetic forecasts.\n"
-                "- Use scientific agronomic principles (WMO SPI, biological nitrogen fixation, SoilGrids).\n"
-                "- Be concise, practical, and respectful of smallholder reality.\n"
+                "- Answer the user's question directly using the provided database information.\n"
+                "- Never invent synthetic weather numbers or fake sensor data.\n"
+                "- Use sound agronomic principles (biological nitrogen fixation, soil drainage, WMO SPI).\n"
+                "- Be concise, practical, and clear for farm operators.\n"
                 f"User Question: {message}\n"
             )
             res = model.generate_content(prompt)
@@ -224,13 +327,12 @@ class AIAssistantService:
                 "capability": capability,
                 "provider": "gemini-1.5-flash",
                 "isLiveAI": True,
-                "disclaimer": "AI Advisory Notice: Generated by Gemini 1.5 Flash grounded in FarmShield context.",
-                "citations": [{"source": "Gemini 1.5 Flash / FarmShield API", "type": "External Model"}],
+                "disclaimer": "AI Advisory Notice: Generated by Gemini 1.5 Flash grounded in FarmShield database context.",
+                "citations": [{"source": "Gemini 1.5 Flash / FarmShield SQLite Database", "type": "Live Model"}],
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
         except Exception as e:
-            # Fallback gracefully to knowledge base if network or quota fails
-            grounded = self._generate_grounded_response(message.lower(), farm_context, country_code, capability)
+            grounded = self._generate_grounded_response(message.lower(), farm_context, country_code, capability, db_data)
             grounded["disclaimer"] += f" (Live AI fallback: {str(e)[:60]})"
             return grounded
 

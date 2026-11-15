@@ -15,24 +15,30 @@ import {
   MapPin,
   ExternalLink,
   Layers,
-  ArrowRight
+  ArrowRight,
+  HelpCircle,
+  CheckCircle2
 } from 'lucide-react';
 import { useFarmShield } from '../context/FarmShieldContext';
-import { Crop } from '../types';
+import { Crop, SoilType } from '../types';
 import { DataSourceBadge } from '../components/common/DataSourceBadge';
 import { CropImage } from '../components/common/CropImage';
+import { SoilKnowledgeModal } from '../components/common/SoilKnowledgeModal';
+import { SOIL_TYPE_DOCUMENTATION } from '../data/soilDocumentation';
 
 export const CropDatabasePage: React.FC = () => {
   const navigate = useNavigate();
   const { crops, selectedCountry, countries, setSelectedCountryCode } = useFarmShield();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
+  const [selectedSoilFilter, setSelectedSoilFilter] = useState<string>('ALL');
   const [selectedCountryFilter, setSelectedCountryFilter] = useState<string>(
     selectedCountry.isoCode || selectedCountry.isoAlpha2 || 'ALL'
   );
   const [activeCrop, setActiveCrop] = useState<Crop>(crops[0]);
+  const [showSoilModal, setShowSoilModal] = useState<boolean>(false);
 
-  // Filter crops by search, category, and country applicability
+  // Filter crops by search, category, soil type, and country applicability
   const filteredCrops = crops.filter((crop) => {
     const matchesSearch =
       crop.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -40,7 +46,9 @@ export const CropDatabasePage: React.FC = () => {
       Object.values(crop.localNames || {}).some((n) =>
         n.toLowerCase().includes(searchQuery.toLowerCase())
       ) ||
-      crop.family.toLowerCase().includes(searchQuery.toLowerCase());
+      crop.family.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (crop.soilPreference || []).some((s) => s.toLowerCase().includes(searchQuery.toLowerCase())) ||
+      (crop.suitableSoilTypes || []).some((s) => s.toLowerCase().includes(searchQuery.toLowerCase()));
 
     const matchesCategory = selectedCategory === 'All' || crop.category === selectedCategory;
 
@@ -49,7 +57,21 @@ export const CropDatabasePage: React.FC = () => {
       crop.countryApplicability.includes(selectedCountryFilter) ||
       crop.countryApplicability.includes('GLOBAL');
 
-    return matchesSearch && matchesCategory && matchesCountry;
+    // Matches soil filter
+    const matchesSoil = (() => {
+      if (selectedSoilFilter === 'ALL') return true;
+      const target = selectedSoilFilter.toLowerCase();
+      // Check in crop.soilPreference (from crops.json)
+      const inPref = (crop.soilPreference || []).some((s) => s.toLowerCase().includes(target));
+      // Check in crop.suitableSoilTypes
+      const inSuitable = (crop.suitableSoilTypes || []).some((s) => s.toLowerCase().includes(target));
+      // Also check documentation mappings if neither has it explicitly
+      const docMatch = SOIL_TYPE_DOCUMENTATION.find((d) => d.shortName.toLowerCase() === target || d.name.toLowerCase() === target);
+      const inDocCrops = docMatch ? docMatch.recommendedCrops.some((c) => c.toLowerCase() === crop.name.toLowerCase()) : false;
+      return inPref || inSuitable || inDocCrops;
+    })();
+
+    return matchesSearch && matchesCategory && matchesCountry && matchesSoil;
   });
 
   return (
@@ -123,6 +145,36 @@ export const CropDatabasePage: React.FC = () => {
               <option value="Root" className="bg-[#132A20] text-white">Root & Tuber</option>
             </select>
           </div>
+
+          {/* Soil Type Filter */}
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-[#8EB897]/20 bg-[#0C1B14]/80">
+            <Layers className="w-4 h-4 text-[#2ECC71]" />
+            <span className="text-xs text-[#8EB897]">Soil Type:</span>
+            <select
+              aria-label="Filter crops by soil type"
+              value={selectedSoilFilter}
+              onChange={(e) => setSelectedSoilFilter(e.target.value)}
+              className="bg-transparent text-xs font-semibold text-white focus:outline-none cursor-pointer"
+            >
+              <option value="ALL" className="bg-[#132A20] text-white">All Soil Types</option>
+              {SOIL_TYPE_DOCUMENTATION.map((s) => (
+                <option key={s.id} value={s.shortName} className="bg-[#132A20] text-white">
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Soil Guide button */}
+          <button
+            type="button"
+            onClick={() => setShowSoilModal(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#2ECC71]/15 hover:bg-[#2ECC71]/25 text-[#2ECC71] border border-[#2ECC71]/30 text-xs font-semibold transition-all shrink-0"
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Soil Identification Guide</span>
+            <span className="sm:hidden">Soil Guide</span>
+          </button>
         </div>
       </div>
 
@@ -314,6 +366,45 @@ export const CropDatabasePage: React.FC = () => {
                 </div>
               </div>
 
+              {/* Soil Preferences & Suitability */}
+              <div className="border border-[#8EB897]/20 rounded-2xl p-4 bg-[#0C1B14]/60 text-xs space-y-2">
+                <div className="flex items-center justify-between">
+                  <h4 className="font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                    <Layers className="w-3.5 h-3.5 text-[#2ECC71]" />
+                    Soil Preferences & Edaphic Suitability
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={() => setShowSoilModal(true)}
+                    className="text-[11px] text-[#2ECC71] hover:underline flex items-center gap-1 font-semibold"
+                  >
+                    <BookOpen className="w-3 h-3" />
+                    Open Soil Guide
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {(activeCrop.soilPreference && activeCrop.soilPreference.length > 0
+                    ? activeCrop.soilPreference
+                    : activeCrop.suitableSoilTypes && activeCrop.suitableSoilTypes.length > 0
+                    ? activeCrop.suitableSoilTypes
+                    : ['Vertisols', 'Cambisols', 'Nitisols']
+                  ).map((soil, idx) => (
+                    <span
+                      key={idx}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#2ECC71]/15 text-[#2ECC71] border border-[#2ECC71]/30 text-xs font-semibold"
+                    >
+                      <CheckCircle2 className="w-3 h-3 text-[#2ECC71]" />
+                      {soil}
+                    </span>
+                  ))}
+                </div>
+                {activeCrop.soilPhRange && (
+                  <p className="text-[11px] text-[#8EB897] pt-1">
+                    <strong className="text-white">Optimal Soil pH:</strong> {activeCrop.soilPhRange.min} – {activeCrop.soilPhRange.max}
+                  </p>
+                )}
+              </div>
+
               {/* Scientific Sources */}
               <div className="bg-[#0C1B14]/60 p-4 rounded-2xl border border-[#8EB897]/15 text-xs text-[#8EB897]">
                 <div className="flex items-center gap-1.5 font-bold text-white mb-1.5">
@@ -334,6 +425,12 @@ export const CropDatabasePage: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Soil Knowledge & Identification Guide Modal */}
+      <SoilKnowledgeModal
+        isOpen={showSoilModal}
+        onClose={() => setShowSoilModal(false)}
+      />
     </div>
   );
 };

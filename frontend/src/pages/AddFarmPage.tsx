@@ -10,9 +10,11 @@ import {
   ShieldCheck,
   CheckCircle2,
   Trash2,
-  Plus
+  Plus,
+  BookOpen,
+  HelpCircle
 } from 'lucide-react';
-import { MapContainer, TileLayer, Marker, Polygon, useMapEvents } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Polygon, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import { useFarmShield } from '../context/FarmShieldContext';
 import { SoilType, WaterAvailability, CropProvenance } from '../types';
@@ -20,6 +22,9 @@ import { DataSourceBadge } from '../components/common/DataSourceBadge';
 import { getCountryConfig } from '../data/countries';
 import { UnitConverter } from '../utils/unitConverter';
 import { FarmShieldApi } from '../services/api';
+import { SoilKnowledgeModal } from '../components/common/SoilKnowledgeModal';
+import { getSoilDocByType } from '../data/soilDocumentation';
+import { resolveAdministrativeCoordinates } from '../data/africanAdministrativeGeo';
 
 // Fix Leaflet's default icon path in bundler environments
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -72,6 +77,23 @@ const MapInteractiveDrawer: React.FC<{
       )}
     </>
   );
+};
+
+// Map auto-controller: smoothly fly to the new location when coordinates or zoom change
+const MapFlyToController: React.FC<{
+  center: [number, number];
+  zoom?: number;
+}> = ({ center, zoom }) => {
+  const map = useMap();
+  useEffect(() => {
+    if (center && !isNaN(center[0]) && !isNaN(center[1])) {
+      map.flyTo(center, zoom || map.getZoom(), {
+        duration: 1.2,
+      });
+    }
+  }, [center[0], center[1], zoom, map]);
+
+  return null;
 };
 
 const SOIL_OPTIONS: SoilType[] = [
@@ -131,6 +153,7 @@ export const AddFarmPage: React.FC = () => {
 
   const [latitude, setLatitude] = useState<number>(initialLat);
   const [longitude, setLongitude] = useState<number>(initialLng);
+  const [mapZoom, setMapZoom] = useState<number>(activeCountryCfg.bounds?.defaultZoom || 13);
   const [currentCrop, setCurrentCrop] = useState<string>('Teff');
   const [plantingDate, setPlantingDate] = useState<string>('2024-07-01');
   const [growingSeason, setGrowingSeason] = useState<string>('Main Season');
@@ -139,6 +162,7 @@ export const AddFarmPage: React.FC = () => {
   const [waterAvailability, setWaterAvailability] = useState<WaterAvailability>('Rainfed');
   const [description, setDescription] = useState('');
   const [elevationMeters, setElevationMeters] = useState<number | string>(1950);
+  const [showSoilModal, setShowSoilModal] = useState<boolean>(false);
 
   // Interactive Boundary Drawing State
   const [isDrawingMode, setIsDrawingMode] = useState<boolean>(false);
@@ -169,7 +193,7 @@ export const AddFarmPage: React.FC = () => {
     fetchDivisions();
   }, [countryCode]);
 
-  // Update center when country changes if adding new
+  // Update center and map viewport when country changes if adding new
   const handleCountryChange = (newCode: string) => {
     setCountryCode(newCode);
     const cfg =
@@ -180,9 +204,35 @@ export const AddFarmPage: React.FC = () => {
     setAdminLevel1('');
     setAdminLevel2('');
     setAdminLevel3('');
-    if (!isEditing && cfg.bounds) {
-      setLatitude(cfg.bounds.center[0]);
-      setLongitude(cfg.bounds.center[1]);
+
+    if (!isEditing) {
+      const geo = resolveAdministrativeCoordinates(newCode);
+      setLatitude(Number(geo.center[0].toFixed(4)));
+      setLongitude(Number(geo.center[1].toFixed(4)));
+      setMapZoom(geo.zoom || cfg.bounds?.defaultZoom || 6);
+    }
+  };
+
+  // Update map viewport when farmer selects or types a Region / State
+  const handleAdmin1Change = (newAdmin1: string) => {
+    setAdminLevel1(newAdmin1);
+    setAdminLevel2('');
+    if (!isEditing && newAdmin1.trim()) {
+      const geo = resolveAdministrativeCoordinates(countryCode, newAdmin1);
+      setLatitude(Number(geo.center[0].toFixed(4)));
+      setLongitude(Number(geo.center[1].toFixed(4)));
+      setMapZoom(geo.zoom || 9);
+    }
+  };
+
+  // Update map viewport when farmer selects or types a District / Sub-City
+  const handleAdmin2Change = (newAdmin2: string) => {
+    setAdminLevel2(newAdmin2);
+    if (!isEditing && newAdmin2.trim()) {
+      const geo = resolveAdministrativeCoordinates(countryCode, adminLevel1, newAdmin2);
+      setLatitude(Number(geo.center[0].toFixed(4)));
+      setLongitude(Number(geo.center[1].toFixed(4)));
+      setMapZoom(geo.zoom || 12);
     }
   };
 
@@ -428,10 +478,7 @@ export const AddFarmPage: React.FC = () => {
               {cityKeys.length > 0 ? (
                 <select
                   value={adminLevel1}
-                  onChange={(e) => {
-                    setAdminLevel1(e.target.value);
-                    setAdminLevel2('');
-                  }}
+                  onChange={(e) => handleAdmin1Change(e.target.value)}
                   className="w-full px-3.5 py-2.5 text-xs bg-[#0C1B14] border border-[#8EB897]/25 rounded-xl text-white focus:outline-none focus:border-[#2ECC71]"
                 >
                   <option value="" className="bg-[#132A20]">-- Select {divisionsData?.admin1_label || 'Region'} --</option>
@@ -445,7 +492,7 @@ export const AddFarmPage: React.FC = () => {
                 <input
                   type="text"
                   value={adminLevel1}
-                  onChange={(e) => setAdminLevel1(e.target.value)}
+                  onChange={(e) => handleAdmin1Change(e.target.value)}
                   placeholder="Enter Region / State"
                   className="w-full px-3.5 py-2.5 text-xs bg-[#0C1B14] border border-[#8EB897]/25 rounded-xl text-white focus:outline-none focus:border-[#2ECC71]"
                 />
@@ -461,7 +508,7 @@ export const AddFarmPage: React.FC = () => {
               {subCitiesOptions.length > 0 ? (
                 <select
                   value={adminLevel2}
-                  onChange={(e) => setAdminLevel2(e.target.value)}
+                  onChange={(e) => handleAdmin2Change(e.target.value)}
                   className="w-full px-3.5 py-2.5 text-xs bg-[#0C1B14] border border-[#8EB897]/25 rounded-xl text-white focus:outline-none focus:border-[#2ECC71]"
                 >
                   <option value="" className="bg-[#132A20]">-- Select District / Sub-City --</option>
@@ -475,7 +522,7 @@ export const AddFarmPage: React.FC = () => {
                 <input
                   type="text"
                   value={adminLevel2}
-                  onChange={(e) => setAdminLevel2(e.target.value)}
+                  onChange={(e) => handleAdmin2Change(e.target.value)}
                   placeholder="Enter District or Zone"
                   className="w-full px-3.5 py-2.5 text-xs bg-[#0C1B14] border border-[#8EB897]/25 rounded-xl text-white focus:outline-none focus:border-[#2ECC71]"
                 />
@@ -650,13 +697,17 @@ export const AddFarmPage: React.FC = () => {
           <div className="h-72 w-full rounded-2xl overflow-hidden border border-[#8EB897]/25 my-3 relative">
             <MapContainer
               center={[latitude, longitude]}
-              zoom={13}
+              zoom={mapZoom}
               scrollWheelZoom={true}
               className="h-full w-full"
             >
               <TileLayer
                 attribution='Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics'
                 url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+              />
+              <MapFlyToController
+                center={[latitude, longitude]}
+                zoom={mapZoom}
               />
               <MapInteractiveDrawer
                 position={[latitude, longitude]}
@@ -674,6 +725,14 @@ export const AddFarmPage: React.FC = () => {
               {isDrawingMode
                 ? 'Click on the satellite imagery to add perimeter boundary vertices.'
                 : 'Click anywhere to pin farm centroid coordinate.'}
+            </div>
+
+            {/* Current Geo Target Badge */}
+            <div className="absolute bottom-2 right-2 z-[1000] bg-[#0C1B14]/85 backdrop-blur-md px-2.5 py-1 rounded-lg border border-[#8EB897]/25 text-[10px] text-[#8EB897] flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-[#2ECC71] animate-pulse"></span>
+              <span>
+                {adminLevel2 || adminLevel1 || countryCode}: {latitude.toFixed(4)}°N, {longitude.toFixed(4)}°E
+              </span>
             </div>
           </div>
 
@@ -719,18 +778,38 @@ export const AddFarmPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Section 4: Soil, Water Supply & Field Elevation */}
+        {/* Section 4: Soil, Water Supply & Farmer Soil Guide */}
         <div>
-          <h3 className="text-sm font-bold text-white uppercase tracking-wider mb-3 flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-blue-400"></span>
-            4. Edaphic Properties & Water Supply
-          </h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-blue-400"></span>
+              4. Edaphic Properties & Water Supply
+            </h3>
+            <button
+              type="button"
+              onClick={() => setShowSoilModal(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#2ECC71]/15 hover:bg-[#2ECC71]/25 text-[#2ECC71] border border-[#2ECC71]/30 text-xs font-semibold transition-all shadow-sm"
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              <span>Soil Identification & Recommended Crops Guide</span>
+            </button>
+          </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-semibold text-white mb-1">
-                Dominant Soil Type
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-semibold text-white">
+                  Dominant Soil Type
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowSoilModal(true)}
+                  className="text-[11px] text-[#2ECC71] hover:underline flex items-center gap-1 font-medium"
+                >
+                  <HelpCircle className="w-3 h-3" />
+                  Not sure? Identify soil
+                </button>
+              </div>
               <select
                 value={soilType}
                 onChange={(e) => setSoilType(e.target.value as SoilType)}
@@ -742,6 +821,45 @@ export const AddFarmPage: React.FC = () => {
                   </option>
                 ))}
               </select>
+
+              {/* Dynamic Soil Quick Preview for Farmers */}
+              {(() => {
+                const doc = getSoilDocByType(soilType);
+                if (!doc) return null;
+                return (
+                  <div className="mt-2 p-2.5 rounded-xl bg-[#132A20]/70 border border-[#8EB897]/20 text-[11px] space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-white flex items-center gap-1.5">
+                        <span
+                          className="w-2.5 h-2.5 rounded-full inline-block"
+                          style={{ backgroundColor: doc.colorCode }}
+                        />
+                        {doc.shortName}
+                        {doc.localNameAmharic && (
+                          <span className="text-[#2ECC71] font-normal">({doc.localNameAmharic})</span>
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowSoilModal(true)}
+                        className="text-[#2ECC71] hover:underline text-[10px] font-semibold"
+                      >
+                        View Full Dossier
+                      </button>
+                    </div>
+                    <p className="text-[#8EB897] leading-relaxed line-clamp-2">
+                      <strong className="text-white">Farmer Clue:</strong> {doc.farmerCharacteristics}
+                    </p>
+                    <p className="text-[#8EB897] leading-relaxed">
+                      <strong className="text-white">Recommended:</strong>{' '}
+                      <span className="text-[#2ECC71] font-medium">
+                        {doc.recommendedCrops.slice(0, 4).join(', ')}
+                        {doc.recommendedCrops.length > 4 ? '...' : ''}
+                      </span>
+                    </p>
+                  </div>
+                );
+              })()}
             </div>
 
             <div>
@@ -759,22 +877,12 @@ export const AddFarmPage: React.FC = () => {
                   </option>
                 ))}
               </select>
+              <p className="mt-2 text-[11px] text-[#8EB897] leading-relaxed">
+                Indicate if field relies purely on seasonal precipitation or has access to river diversion, boreholes, or supplemental gravity irrigation.
+              </p>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-white mb-1">
-                Elevation (Meters a.s.l.)
-              </label>
-              <input
-                type="number"
-                value={elevationMeters}
-                onChange={(e) => setElevationMeters(e.target.value)}
-                placeholder="e.g. 1950"
-                className="w-full px-3.5 py-2.5 text-xs bg-[#0C1B14] border border-[#8EB897]/25 rounded-xl text-white focus:outline-none focus:border-[#2ECC71]"
-              />
-            </div>
-
-            <div className="sm:col-span-3">
+            <div className="sm:col-span-2">
               <label className="block text-xs font-semibold text-white mb-1">
                 Field Observations & Historical Notes
               </label>
@@ -808,6 +916,14 @@ export const AddFarmPage: React.FC = () => {
           </button>
         </div>
       </form>
+
+      {/* Soil Knowledge & Identification Modal */}
+      <SoilKnowledgeModal
+        isOpen={showSoilModal}
+        onClose={() => setShowSoilModal(false)}
+        selectedSoilType={soilType}
+        onSelectSoilType={(newSoil) => setSoilType(newSoil)}
+      />
     </div>
   );
 };
